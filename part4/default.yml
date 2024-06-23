@@ -1,0 +1,281 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admints
+  namespace: adits
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: admints-filebeat-config
+  namespace: adits
+data:
+  default.yml: |
+    - type: log
+      paths:
+        - /var/log/*.log
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: admints-services-cfgmap
+  namespace: adits
+data:
+  admints-services: |
+    {
+     "TS": [
+      {
+       "SN": "mgmtsvc",
+       "NS": "default",
+       "U": "/api/v1/src/mgmtsvc/customer/",
+       "P": "8085",
+       "M": "POST"
+      }
+     ]
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: paasts-services-cfgmap
+  namespace: adits
+data:
+  paasts-services: |
+    {
+     "TS": [
+      {
+       "SN": "cfgserv",
+       "NS": "default",
+       "U": "/",
+       "P": "8001",
+       "M": "GET"
+      }
+     ]
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admints
+  namespace: adits
+  labels:
+    app: admints
+    adinwpvault: "true"
+    adinwpsql: "true"
+    adinwpmgmtsvc: "true"
+spec:
+  ports:
+  - protocol: TCP
+    port: 18085
+    targetPort: 18085
+    name: admints
+  selector:
+    app: admints
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admints
+  namespace: adits
+  annotations:
+    prometheus.io/path: /metrics
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "18085"
+spec:
+  selector:
+    matchLabels:
+      app: admints
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: admints
+        adinwpvault: "true"
+        adinwpsql: "true"
+        adinwpmgmtsvc: "true"
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "18085"
+    spec:
+      serviceAccountName: admints
+      containers:
+        - name: filebeat
+          image: gcr.io/ngfw-dev/filebeat-1.0.0:latest
+          imagePullPolicy: Always
+          command: ["/usr/share/filebeat/filebeat", "-e"]
+          volumeMounts:
+          - name: varlog
+            mountPath: /var/log
+          - name: admints-filebeat-config
+            mountPath: /usr/share/filebeat/prospectors.d
+        - name: panvaultagent
+          image: gcr.io/ngfw-dev/panvaultagent:latest
+          env:
+            - name: VAULT_CACERT
+              value: /etc/vault-ca-cert/ca.crt
+            - name: VAULT_K8S_AUTH
+              value: /etc/vault-k8s-auth/k8s-auth
+            - name: VAULT_ROLE
+              value: /etc/vault-role/admints-role
+            - name: VAULT_ADDR
+              valueFrom:
+                configMapKeyRef:
+                    name: vault-addr
+                    key: vaultaddr
+            - name: VAULT_PATH_PREFIX
+              valueFrom:
+                configMapKeyRef:
+                  name: vault-path-pref
+                  key: vaultpathpref
+          ports:
+            - containerPort: 8989
+          #command: ["/bin/bash", "/usr/local/bin/initpanvaultagent"]
+          command: ["/usr/local/bin/panvaultagent"]
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 2000
+          volumeMounts:
+            - name: vault-k8s-auth-vol
+              mountPath: "/etc/vault-k8s-auth"
+              readOnly: true
+            - name: admints-role-vol
+              mountPath: "/etc/vault-role"
+              readOnly: true
+            - name: vault-ca-cert-vol
+              mountPath: "/etc/vault-ca-cert"
+              readOnly: true
+        - name: admints
+          image: $IMG_TAG
+          env:
+            - name: MY_PORT
+              value: "18085"
+            - name: ADMIN_DB_PORT
+              value: "3310"
+            - name: VAULT_K8S_AUTH
+              value: /etc/vault-k8s-auth/k8s-auth
+            - name: VAULT_CACERT
+              value: /etc/vault-ca-cert/ca.crt
+            - name: VAULT_ADDR
+              valueFrom:
+                configMapKeyRef:
+                    name: vault-addr
+                    key: vaultaddr
+            - name: PN_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: PN_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PN_CLUSTER_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: pn.notify.cluster
+                  key: cluster_name
+            - name: PRISMA_TS_GCS
+              value: "$PRISMA_TS_GCS"
+            - name: PN-REGION
+              value: $PRISMAREGION
+            - name: PN-PROJECT
+              value: $PRISMAPROJECT
+            - name: PRISMA_TS_GSLOCATION
+              value: $PRISMATAG
+            - name: ADMINTS_CONFIG_MAP
+              value: "/etc/tscfgmapdir/admin/admints-services"
+            - name: PAASTS_CONFIG_MAP
+              value: "/etc/tscfgmapdir/paas/paasts-services"
+          ports:
+            - containerPort: 18085
+          #resources:
+            #requests:
+              #memory: "1Gi"
+              #cpu: "0.5"
+            #limits:
+              #memory: "2Gi"
+              #cpu: "1"
+          volumeMounts:
+          - name: admintscfgmap
+            mountPath: "/etc/tscfgmapdir/admin"
+            readOnly: true
+          - name: paastscfgmap
+            mountPath: "/etc/tscfgmapdir/paas"
+            readOnly: true
+          - name: varlog
+            mountPath: /var/log
+          - name: secrets
+            mountPath: "/etc/secrets"
+            readOnly: true
+          - name: vault-ca-cert-vol
+            mountPath: "/etc/vault-ca-cert"
+            readOnly: true
+          - name: vault-k8s-auth-vol
+            mountPath: "/etc/vault-k8s-auth"
+            readOnly: true
+          command: ["/bin/bash", "/usr/local/bin/initts.sh"]
+          #command: ["/usr/local/bin/admints"]
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 3000
+            #capabilities:
+              #add: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /is_alive
+              port: 18085
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /is_alive
+              port: 18085
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 10
+        - name:  cloudsql-proxy
+          image: gcr.io/cloudsql-docker/gce-proxy:1.33.0-alpine
+          env:
+            - name: SQL_PORT
+              value: "3310"
+          command: ["/cloud_sql_proxy",
+                "-instances=$PRISMA_DB_INSTANCE=tcp:3310",
+                "-credential_file=/etc/secrets/sql.key"]
+          securityContext:
+            runAsUser: 2000
+          volumeMounts:
+            - name: secrets
+              mountPath: "/etc/secrets"
+              readOnly: true
+      volumes:
+      - name: varlog
+        emptyDir: {}
+      - name: secrets
+        secret:
+          secretName: sqlkey
+      - name: admints-filebeat-config
+        configMap:
+            name: admints-filebeat-config
+      - name: vault-k8s-auth-vol
+        configMap:
+            name: vault-k8s-auth
+      - name: admints-role-vol
+        configMap:
+            name: admints-role
+      - name: vault-ca-cert-vol
+        secret:
+          secretName: vault-ca-cert
+      - name: admintscfgmap
+        configMap:
+            name: admints-services-cfgmap
+            items:
+            - key: admints-services
+              path: admints-services
+      - name: paastscfgmap
+        configMap:
+            name: paasts-services-cfgmap
+            items:
+            - key: paasts-services
+              path: paasts-services
